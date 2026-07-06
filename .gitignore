@@ -23,3 +23,7 @@ erl_crash.dump
 # Ignore package tarball (built via "mix hex.build").
 freaking_awesome_elixir-*.tar
 
+# Ignore MkDocs build output and temporary files
+/site/
+/README.md.orig
+

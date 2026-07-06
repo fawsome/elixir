@@ -27,4 +27,14 @@ defmodule FreakingAwesomeElixirTest do
     assert FAE.gitlab_url_to_api("https://gitlab.com/cizen/cizen") ==
              "https://gitlab.com/api/v4/projects/cizen%2Fcizen"
   end
+
+  test "malformed markdown link" do
+    assert FAE.markdown_to_url("* [broken link") == nil
+    assert FAE.extract_stats("* [broken link") == %{stats: nil, line: "* [broken link"}
+  end
+
+  test "parse_stats with malicious language injection" do
+    body = ~s[{"stargazers_count": 10, "forks_count": 2, "language": "Elixir** <script>alert(1)</script>"}]
+    assert FAE.parse_stats(String.to_charlist(body)) == {10, 2, "Elixir"}
+  end
 end

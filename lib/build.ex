@@ -1,29 +1,37 @@
 defmodule FAE do
   @spec download_source(String.t()) :: :ok
   def download_source(outfile \\ "README.md.orig") do
-    # Application.ensure_all_started(:inets)
-    # Application.ensure_all_started(:ssl)
-    {:ok, {{'HTTP/1.1', 200, 'OK'}, _headers, body}} =
+    response =
       :httpc.request(
         :get,
-        {'https://raw.githubusercontent.com/h4cc/awesome-elixir/master/README.md', []},
+        {~c"https://raw.githubusercontent.com/h4cc/awesome-elixir/master/README.md", []},
         [],
         []
       )
 
-    readme = List.to_string(body)
-    File.write!(outfile, readme)
+    case response do
+      {:ok, {{_version, 200, _phrase}, _headers, body}} ->
+        readme = List.to_string(body)
+        File.write!(outfile, readme)
+        :ok
+
+      other ->
+        IO.puts("Failed to download source README.md.orig: #{inspect(other)}")
+        raise "Failed to download upstream source README.md.orig"
+    end
   end
 
-  @spec markdown_to_url(String.t()) :: String.t()
+  @spec markdown_to_url(String.t()) :: String.t() | nil
   def markdown_to_url(line) do
-    %{"url" => url} = Regex.named_captures(~r/\((?<url>.*?)\)/, line)
-    url
+    case Regex.named_captures(~r/\((?<url>https?:\/\/.*?)\)/, line) do
+      %{"url" => url} -> url
+      _ -> nil
+    end
   end
 
   @spec pad(integer, integer) :: String.t()
   def pad(number, count \\ 5) do
-    # uses ensp instead of nbsp
+    # uses ensp instead of java/html space
     number |> Integer.to_string() |> String.pad_leading(count) |> String.replace(" ", "&ensp;")
   end
 
@@ -50,11 +58,11 @@ defmodule FAE do
     headers =
       case authen_header do
         nil ->
-          [{'User-Agent', 'Erlang/httpc'}]
+          [{~c"User-Agent", ~c"Erlang/httpc"}]
 
         _ ->
           [
-            {'User-Agent', 'Erlang/httpc'},
+            {~c"User-Agent", ~c"Erlang/httpc"},
             authen_header
           ]
       end
@@ -63,8 +71,8 @@ defmodule FAE do
   end
 
   def query_gitlab_api(api_url) do
-    # there are only 3 GitLab link in README.md, thus need GITLAB_ACCESS_TOKEN
-    # coz we not going to reach limit any time soon
+    # there are only 3 GitLab links in README.md, thus need GITLAB_ACCESS_TOKEN
+    # coz we are not going to reach limit any time soon
     personal_access_token = System.get_env("GITLAB_ACCESS_TOKEN")
 
     authen_header =
@@ -73,7 +81,7 @@ defmodule FAE do
           nil
 
         token ->
-          {'Private-Token', String.to_charlist(token)}
+          {~c"Private-Token", String.to_charlist(token)}
       end
 
     http_get(api_url, authen_header)
@@ -90,29 +98,51 @@ defmodule FAE do
           nil
 
         token ->
-          nil
-          {'Authorization', 'bearer ' ++ String.to_charlist(token)}
+          {~c"Authorization", ~c"bearer " ++ String.to_charlist(token)}
       end
 
     http_get(api_url, authen_header)
   end
 
-  @spec parse_stats(list) :: {integer, integer, String.t()}
+  @spec parse_stats(list) :: {integer, integer, String.t() | nil}
   def parse_stats(body) do
-    body = List.to_string(body)
-    stars = Regex.named_captures(~r/\"stargazers_count\":(?<count>\d+)/, body)
-    forks = Regex.named_captures(~r/\"forks_count\":(?<count>\d+)/, body)
-    lang = Regex.named_captures(~r/\"language\":"(?<name>\w+)"/, body)
-    langname = lang["name"]
-    {String.to_integer(stars["count"]), String.to_integer(forks["count"]), langname}
+    try do
+      body = List.to_string(body)
+      stars = Regex.named_captures(~r/\"stargazers_count\"\s*:\s*(?<count>\d+)/, body)
+      forks = Regex.named_captures(~r/\"forks_count\"\s*:\s*(?<count>\d+)/, body)
+      lang = Regex.named_captures(~r/\"language\"\s*:\s*\"(?<name>.*?)\"/, body)
+
+      stars_count = (stars && stars["count"] && String.to_integer(stars["count"])) || 0
+      forks_count = (forks && forks["count"] && String.to_integer(forks["count"])) || 0
+      
+      langname = (lang && lang["name"]) || nil
+      sanitized_langname =
+        case langname do
+          nil -> nil
+          name ->
+            case Regex.run(~r/^[a-zA-Z0-9\s+#\-.]+/, name) do
+              [valid_prefix] -> String.trim(valid_prefix)
+              _ -> nil
+            end
+        end
+
+      {stars_count, forks_count, sanitized_langname}
+    rescue
+      _ -> {0, 0, nil}
+    end
   end
 
   def parse_gitlab_stats(body) do
-    body = List.to_string(body)
-    stars = Regex.named_captures(~r/\"star_count\":(?<count>\d+)/, body)
-    forks = Regex.named_captures(~r/\"forks_count\":(?<count>\d+)/, body)
-    # TODO find way to get language, it shows on GitLab Web
-    {String.to_integer(stars["count"]), String.to_integer(forks["count"]), nil}
+    try do
+      body = List.to_string(body)
+      stars = Regex.named_captures(~r/\"star_count\"\s*:\s*(?<count>\d+)/, body)
+      forks = Regex.named_captures(~r/\"forks_count\"\s*:\s*(?<count>\d+)/, body)
+      stars_count = (stars && stars["count"] && String.to_integer(stars["count"])) || 0
+      forks_count = (forks && forks["count"] && String.to_integer(forks["count"])) || 0
+      {stars_count, forks_count, nil}
+    rescue
+      _ -> {0, 0, nil}
+    end
   end
 
   @doc """
@@ -120,50 +150,64 @@ defmodule FAE do
   """
   @spec extract_stats(String.t()) :: map
   def extract_stats(line) do
-    url = markdown_to_url(line)
+    try do
+      url = markdown_to_url(line)
 
-    cond do
-      String.contains?(url, "//github.com/") ->
-        api_url = url_to_api(url)
-        response = query_github_api(api_url)
+      cond do
+        url && String.contains?(url, "//github.com/") ->
+          api_url = url_to_api(url)
+          response = query_github_api(api_url)
 
-        case response do
-          {:ok, {{'HTTP/1.1', 404, 'Not Found'}, _, _}} ->
-            %{stats: false, line: line}
+          case response do
+            {:ok, {{_version, 200, _phrase}, _headers, body}} ->
+              {stargazers_count, forks_count, language} = parse_stats(body)
 
-          {:ok, {{'HTTP/1.1', 200, 'OK'}, _headers, body}} ->
-            {stargazers_count, forks_count, language} = parse_stats(body)
+              %{
+                stats: true,
+                line: line,
+                stargazers_count: stargazers_count,
+                forks_count: forks_count,
+                language: language
+              }
 
-            %{
-              stats: true,
-              line: line,
-              stargazers_count: stargazers_count,
-              forks_count: forks_count,
-              language: language
-            }
-        end
+            {:ok, {{_version, 404, _phrase}, _, _}} ->
+              %{stats: false, line: line}
 
-      String.contains?(url, "//gitlab.com/") ->
-        api_url = gitlab_url_to_api(url)
-        response = query_gitlab_api(api_url)
+            other ->
+              IO.puts("GitHub API error/rate limit for #{url}: #{inspect(other)}")
+              %{stats: nil, line: line}
+          end
 
-        case response do
-          {:ok, {{'HTTP/1.1', 404, 'Not Found'}, _, _}} ->
-            %{stats: false, line: line}
+        url && String.contains?(url, "//gitlab.com/") ->
+          api_url = gitlab_url_to_api(url)
+          response = query_gitlab_api(api_url)
 
-          {:ok, {{'HTTP/1.1', 200, 'OK'}, _headers, body}} ->
-            {stargazers_count, forks_count, nil} = parse_gitlab_stats(body)
+          case response do
+            {:ok, {{_version, 200, _phrase}, _headers, body}} ->
+              {stargazers_count, forks_count, nil} = parse_gitlab_stats(body)
 
-            %{
-              stats: true,
-              line: line,
-              stargazers_count: stargazers_count,
-              forks_count: forks_count,
-              language: nil
-            }
-        end
+              %{
+                stats: true,
+                line: line,
+                stargazers_count: stargazers_count,
+                forks_count: forks_count,
+                language: nil
+              }
 
-      true ->
+            {:ok, {{_version, 404, _phrase}, _, _}} ->
+              %{stats: false, line: line}
+
+            other ->
+              IO.puts("GitLab API error/rate limit for #{url}: #{inspect(other)}")
+              %{stats: nil, line: line}
+          end
+
+        true ->
+          %{stats: nil, line: line}
+      end
+    rescue
+      error ->
+        IO.puts("Failed to extract stats for line: #{line}. Error: #{inspect(error)}")
         %{stats: nil, line: line}
     end
   end

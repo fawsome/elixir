@@ -1,26 +1,63 @@
-name: Elixir CI
+name: Elixir CI & Deploy
 
-on: push
+on:
+  push:
+    branches: [ "master" ]
+  schedule:
+    # Run daily at 00:00 UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
-  test:
+  build-and-deploy:
     runs-on: ubuntu-latest
-    name: OTP ${{matrix.otp}} / Elixir ${{matrix.elixir}}
-    strategy:
-      matrix:
-        otp: [21.3.8.10, 22.1.7]
-        elixir: [1.9.4]
-    env:
-      MIX_ENV: test
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-    - uses: actions/checkout@v2
-    - name: Setup elixir
-      uses: actions/setup-elixir@v1.0.0
-      with:
-        otp-version: ${{matrix.otp}}
-        elixir-version: ${{matrix.elixir}}
-    - name: Install Dependencies
-      run: mix deps.get
-    - name: Run Tests
-      run: mix coveralls.github
+      - name: Checkout repository
+        run: |
+          git clone "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" .
+          git checkout ${{ github.ref_name }}
+
+      - name: Install Elixir and MkDocs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y elixir mkdocs
+
+      - name: Run Tests
+        run: mix test
+
+      - name: Update Elixir Packages Statistics
+        env:
+          GITHUB_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: mix fae
+
+      - name: Build with MkDocs
+        run: mkdocs build
+
+      - name: Deploy to GitHub Pages (gh-pages branch)
+        run: |
+          cd site
+          touch .nojekyll
+          git init
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          git checkout -b gh-pages
+          git add .
+          git commit -m "Auto-deploy to GitHub Pages [skip ci]"
+          git push --force origin gh-pages
+
+      - name: Commit and Push Updated README to master
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          if ! git diff --quiet --cached; then
+            git commit -m "Auto-update package statistics [skip ci]"
+            git push origin ${{ github.ref_name }} || echo "Push failed, skipping best-effort commit update."
+          else
+            echo "No changes in README.md"
+          fi
+        continue-on-error: true
